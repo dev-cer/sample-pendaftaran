@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Rekap Pendaftaran{% endblock %}
+{% block content %}
+<div class="flex flex-wrap items-end justify-between gap-4">
+  <div>
+    <p class="text-sm font-bold uppercase tracking-widest text-emerald-700">Rekap real-time</p>
+    <h1 class="mt-1 text-3xl font-extrabold">Pendaftaran PPDB {{ app.tahun_ajaran }}</h1>
+  </div>
+  <p class="flex items-center gap-2 text-sm text-slate-500"><span class="h-2 w-2 animate-pulse rounded-full bg-emerald-500"></span> diperbarui tiap 2 detik</p>
+</div>
+<div class="mt-6" hx-get="/dashboard/panel" hx-trigger="every 2s" hx-swap="innerHTML">
+  {% include "partials/panel.html" %}
+</div>
+{% endblock %}

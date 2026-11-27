@@ -52,6 +52,34 @@ pub struct Statistik {
     pub meta: Meta,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RekapSekolah {
+    pub kode: String,
+    pub nama: String,
+    pub kecamatan: String,
+    pub kuota: u32,
+    pub diterima: u64,
+    pub gagal: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RekapMenit {
+    pub jam: String,
+    pub diterima: u64,
+    pub gagal: u64,
+}
+
+/// Rekap bersama semua pod API (dari ppdb-store lewat ppdb-api).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Dashboard {
+    pub tersambung: bool,
+    pub sekolah: Vec<RekapSekolah>,
+    pub total_diterima: u64,
+    pub total_gagal: u64,
+    pub per_menit: Vec<RekapMenit>,
+    pub pod_api_aktif: u64,
+}
+
 #[derive(Debug, Deserialize)]
 struct Diterima {
     pendaftar: Pendaftar,
@@ -79,6 +107,8 @@ pub struct FormPendaftaran {
 pub enum HasilDaftar {
     Diterima(Pendaftar, Meta),
     Ditolak(BTreeMap<String, String>),
+    /// ppdb-api penuh (503): pendaftar diminta mencoba lagi.
+    Sibuk,
     /// ppdb-api tidak bisa dihubungi atau galat.
     Gangguan(String),
 }
@@ -107,6 +137,10 @@ impl ApiClient {
         self.get("/api/statistik").await
     }
 
+    pub async fn dashboard(&self) -> Result<Dashboard, String> {
+        self.get("/api/dashboard").await
+    }
+
     async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, String> {
         let r = self.http.get(format!("{}{path}", self.base)).send().await.map_err(|e| e.to_string())?;
         if !r.status().is_success() {
@@ -129,6 +163,7 @@ impl ApiClient {
                 Ok(d) => HasilDaftar::Ditolak(d.kesalahan),
                 Err(e) => HasilDaftar::Gangguan(e.to_string()),
             },
+            503 => HasilDaftar::Sibuk,
             s => HasilDaftar::Gangguan(format!("ppdb-api menjawab {s}")),
         }
     }

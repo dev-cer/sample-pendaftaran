@@ -1,0 +1,43 @@
+<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+  <div class="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+    <p class="text-sm font-semibold text-slate-500">Pendaftar berhasil</p>
+    <p class="mt-1 text-4xl font-extrabold text-emerald-700 tabular-nums">{{ r.total_diterima }}</p>
+  </div>
+  <div class="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+    <p class="text-sm font-semibold text-slate-500">Gagal (server sibuk)</p>
+    <p class="mt-1 text-4xl font-extrabold text-red-600 tabular-nums">{{ r.total_gagal }}</p>
+  </div>
+  <div class="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+    <p class="text-sm font-semibold text-slate-500">Tingkat keberhasilan</p>
+    <p class="mt-1 text-4xl font-extrabold tabular-nums">{{ r.persen_berhasil }}</p>
+  </div>
+  <div class="rounded-2xl bg-emerald-700 p-5 text-white shadow-sm">
+    <p class="text-sm font-semibold text-emerald-100">Pod API aktif</p>
+    <p class="mt-1 text-4xl font-extrabold tabular-nums">{{ r.pod_api_aktif }}</p>
+  </div>
+</div>
+
+<div class="mt-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+  <div class="flex flex-wrap items-baseline justify-between gap-2">
+    <h2 class="text-lg font-bold">Pendaftar per menit (10 menit terakhir)</h2>
+    <p class="text-sm text-slate-500">Puncak berhasil: <b class="text-slate-800">{{ r.puncak_per_menit }}</b>/menit
+      · <span class="inline-block h-2.5 w-2.5 rounded-sm bg-emerald-500"></span> berhasil
+      <span class="ml-2 inline-block h-2.5 w-2.5 rounded-sm bg-red-400"></span> gagal</p>
+  </div>
+  <div class="mt-4 flex h-48 items-end gap-2">
+    {% for m in r.menit %}
+    <div class="flex h-full flex-1 flex-col items-center justify-end gap-1" title="{{ m.jam }}: {{ m.diterima }} berhasil, {{ m.gagal }} gagal">
+      <span class="text-[11px] text-slate-500 tabular-nums">{% if m.diterima + m.gagal > 0 %}{{ m.diterima }}{% endif %}</span>
+      <div class="flex w-full flex-col justify-end overflow-hidden rounded-t-md" style="height: {{ m.tinggi_ok + m.tinggi_gagal }}%">
+        <div class="bg-red-400" style="height: {% if m.tinggi_ok + m.tinggi_gagal > 0 %}{{ m.tinggi_gagal * 100 / (m.tinggi_ok + m.tinggi_gagal) }}{% else %}0{% endif %}%"></div>
+        <div class="flex-1 bg-emerald-500"></div>
+      </div>
+      <span class="text-[11px] text-slate-500">{{ m.jam }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="mt-6">
+  {% include "partials/tabel_sekolah.html" %}
+</div>
