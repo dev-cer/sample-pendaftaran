@@ -1,0 +1,15 @@
+# ppdb-api: REST API pendaftaran (Rust). Image kecil, satu binary.
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY api ./api
+COPY web ./web
+RUN cargo build --release --locked -p ppdb-api
+
+FROM debian:bookworm-slim
+RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin app
+COPY --from=build /src/target/release/ppdb-api /app/ppdb-api
+USER 10001
+ENV PORT=8081
+EXPOSE 8081
+CMD ["/app/ppdb-api"]

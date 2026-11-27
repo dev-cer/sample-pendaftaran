@@ -1,4 +1,4 @@
 target
 bin
 .git
-static/app.css
+web/static/app.css

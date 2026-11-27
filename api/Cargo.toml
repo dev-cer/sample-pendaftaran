@@ -1,0 +1,14 @@
+[package]
+name = "ppdb-api"
+version = "0.2.0"
+edition = "2021"
+description = "PPDB API: validasi, verifikasi, dan nomor pendaftaran (MVC, JSON)"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+rand = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

@@ -1,19 +1,20 @@
-//! Model Pendaftar: data formulir, validasi, verifikasi, dan penyimpanan.
+//! Model Pendaftar: validasi aturan PPDB, verifikasi data (beban CPU), dan penyimpanan.
 //!
 //! Penyimpanan sengaja di memori per pod (aplikasi sampel untuk demo platform).
-//! Di produksi, ganti `PendaftarStore` dengan repository ke database, kredensialnya
+//! Di produksi, `PendaftarStore` diganti repository ke database dengan kredensial
 //! dari Secret `db-credentials` (Vault).
 
 use super::sekolah::{self, Jalur, Sekolah};
 use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
-/// Data mentah dari formulir.
+/// Data masukan dari ppdb-web (JSON).
 #[derive(Debug, Default, Deserialize)]
-pub struct FormPendaftaran {
+pub struct InputPendaftaran {
     #[serde(default)]
     pub nama: String,
     #[serde(default)]
@@ -24,7 +25,6 @@ pub struct FormPendaftaran {
     pub jalur: String,
 }
 
-/// Pendaftar yang sudah lolos validasi dan verifikasi.
 #[derive(Clone, Debug)]
 pub struct Pendaftar {
     pub nomor: String,
@@ -36,52 +36,36 @@ pub struct Pendaftar {
     pub kode_verifikasi: String,
 }
 
-/// Kesalahan validasi per isian, ditampilkan kembali di formulir.
-#[derive(Debug, Default)]
-pub struct Kesalahan {
-    pub nama: Option<&'static str>,
-    pub nisn: Option<&'static str>,
-    pub sekolah: Option<&'static str>,
-    pub jalur: Option<&'static str>,
-}
+/// Kesalahan per isian: nama isian -> pesan.
+pub type Kesalahan = BTreeMap<&'static str, &'static str>;
 
-impl Kesalahan {
-    pub fn ada(&self) -> bool {
-        self.nama.is_some() || self.nisn.is_some() || self.sekolah.is_some() || self.jalur.is_some()
-    }
-}
-
-impl FormPendaftaran {
-    /// Validasi aturan PPDB: nama wajib, NISN 10 digit, sekolah dan jalur dikenal.
+impl InputPendaftaran {
     pub fn validasi(&self) -> Result<(&'static Sekolah, Jalur), Kesalahan> {
-        let mut k = Kesalahan::default();
-        let nama = self.nama.trim();
-        if nama.chars().count() < 3 {
-            k.nama = Some("Nama lengkap minimal 3 huruf.");
+        let mut k = Kesalahan::new();
+        if self.nama.trim().chars().count() < 3 {
+            k.insert("nama", "Nama lengkap minimal 3 huruf.");
         }
         let nisn = self.nisn.trim();
         if nisn.len() != 10 || !nisn.chars().all(|c| c.is_ascii_digit()) {
-            k.nisn = Some("NISN harus 10 digit angka.");
+            k.insert("nisn", "NISN harus 10 digit angka.");
         }
         let sekolah = sekolah::cari(self.sekolah.trim());
         if sekolah.is_none() {
-            k.sekolah = Some("Pilih sekolah tujuan.");
+            k.insert("sekolah", "Pilih sekolah tujuan.");
         }
         let jalur = Jalur::dari_kode(self.jalur.trim());
         if jalur.is_none() {
-            k.jalur = Some("Pilih jalur pendaftaran.");
+            k.insert("jalur", "Pilih jalur pendaftaran.");
         }
-        if k.ada() {
-            Err(k)
-        } else {
-            Ok((sekolah.unwrap(), jalur.unwrap()))
+        match (sekolah, jalur) {
+            (Some(s), Some(j)) if k.is_empty() => Ok((s, j)),
+            _ => Err(k),
         }
     }
 }
 
-/// Verifikasi data: hash berulang atas NISN + nama + garam acak.
-/// Ini mensimulasikan pekerjaan nyata (cek data kependudukan, tanda tangan dokumen)
-/// sehingga beban CPU naik wajar saat banyak orang mendaftar bersamaan.
+/// Verifikasi data: hash berulang atas NISN + nama + garam acak. Mensimulasikan pekerjaan
+/// nyata (cek data kependudukan, tanda tangan dokumen) supaya CPU naik wajar saat ramai.
 pub fn verifikasi(nisn: &str, nama: &str, iterasi: u32) -> String {
     let garam: [u8; 16] = rand::thread_rng().gen();
     let mut h = Sha256::new();
@@ -111,28 +95,29 @@ pub fn nomor_pendaftaran(tahun: &str) -> String {
 /// Penyimpanan di memori: maksimal `KAPASITAS` pendaftar terakhir per pod.
 pub struct PendaftarStore {
     data: RwLock<VecDeque<Pendaftar>>,
-    total: RwLock<u64>,
+    total: AtomicU64,
 }
 
 const KAPASITAS: usize = 1000;
 
-impl PendaftarStore {
-    pub fn new() -> Self {
-        Self { data: RwLock::new(VecDeque::with_capacity(KAPASITAS)), total: RwLock::new(0) }
+impl Default for PendaftarStore {
+    fn default() -> Self {
+        Self { data: RwLock::new(VecDeque::with_capacity(KAPASITAS)), total: AtomicU64::new(0) }
     }
+}
 
+impl PendaftarStore {
     pub fn simpan(&self, p: Pendaftar) {
         let mut d = self.data.write().unwrap();
         if d.len() == KAPASITAS {
             d.pop_front();
         }
         d.push_back(p);
-        *self.total.write().unwrap() += 1;
+        self.total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Jumlah pendaftar yang dilayani pod ini sejak berjalan.
     pub fn total(&self) -> u64 {
-        *self.total.read().unwrap()
+        self.total.load(Ordering::Relaxed)
     }
 
     pub fn terakhir(&self, n: usize) -> Vec<Pendaftar> {
@@ -144,19 +129,19 @@ impl PendaftarStore {
 mod tests {
     use super::*;
 
-    fn form(nama: &str, nisn: &str, sekolah: &str, jalur: &str) -> FormPendaftaran {
-        FormPendaftaran { nama: nama.into(), nisn: nisn.into(), sekolah: sekolah.into(), jalur: jalur.into() }
+    fn input(nama: &str, nisn: &str, sekolah: &str, jalur: &str) -> InputPendaftaran {
+        InputPendaftaran { nama: nama.into(), nisn: nisn.into(), sekolah: sekolah.into(), jalur: jalur.into() }
     }
 
     #[test]
     fn validasi_lolos() {
-        assert!(form("Siti Aminah", "0123456789", "SMPN1", "domisili").validasi().is_ok());
+        assert!(input("Siti Aminah", "0123456789", "SMPN1", "domisili").validasi().is_ok());
     }
 
     #[test]
     fn validasi_nisn_salah() {
-        let k = form("Siti Aminah", "12345", "SMPN1", "domisili").validasi().unwrap_err();
-        assert!(k.nisn.is_some() && k.nama.is_none());
+        let k = input("Siti Aminah", "12345", "SMPN1", "domisili").validasi().unwrap_err();
+        assert!(k.contains_key("nisn") && !k.contains_key("nama"));
     }
 
     #[test]

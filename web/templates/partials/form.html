@@ -1,38 +1,41 @@
 <form id="area" method="post" action="/daftar" hx-post="/daftar" hx-target="#area" hx-swap="outerHTML" hx-disabled-elt="button"
       class="space-y-5 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+  {% if let Some(g) = f.gangguan %}
+  <div class="rounded-xl bg-red-50 p-4 text-sm text-red-800 ring-1 ring-red-200"><b>Layanan pendaftaran sedang sibuk.</b> Data belum terkirim, silakan kirim ulang. <span class="text-red-600">({{ g }})</span></div>
+  {% endif %}
   <div>
     <label for="nama" class="block text-sm font-semibold">Nama lengkap</label>
     <input id="nama" name="nama" value="{{ f.nama }}" autocomplete="name"
            class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-200">
-    {% if let Some(e) = f.err.nama %}<p class="mt-1 text-sm text-red-600">{{ e }}</p>{% endif %}
+    {% if let Some(e) = f.err.get("nama") %}<p class="mt-1 text-sm text-red-600">{{ e }}</p>{% endif %}
   </div>
   <div>
     <label for="nisn" class="block text-sm font-semibold">NISN</label>
     <input id="nisn" name="nisn" value="{{ f.nisn }}" inputmode="numeric" maxlength="10" placeholder="10 digit"
            class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-200">
-    {% if let Some(e) = f.err.nisn %}<p class="mt-1 text-sm text-red-600">{{ e }}</p>{% endif %}
+    {% if let Some(e) = f.err.get("nisn") %}<p class="mt-1 text-sm text-red-600">{{ e }}</p>{% endif %}
   </div>
   <div>
     <label for="sekolah" class="block text-sm font-semibold">Sekolah tujuan</label>
     <select id="sekolah" name="sekolah" class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 focus:border-emerald-600 focus:outline-none">
       <option value="">Pilih sekolah</option>
       {% for s in f.sekolah %}
-      <option value="{{ s.kode }}" {% if s.kode == f.sekolah_dipilih.as_str() %}selected{% endif %}>{{ s.nama }} ({{ s.kecamatan }})</option>
+      <option value="{{ s.kode }}" {% if s.kode == f.sekolah_dipilih %}selected{% endif %}>{{ s.nama }} ({{ s.kecamatan }})</option>
       {% endfor %}
     </select>
-    {% if let Some(e) = f.err.sekolah %}<p class="mt-1 text-sm text-red-600">{{ e }}</p>{% endif %}
+    {% if let Some(e) = f.err.get("sekolah") %}<p class="mt-1 text-sm text-red-600">{{ e }}</p>{% endif %}
   </div>
   <fieldset>
     <legend class="block text-sm font-semibold">Jalur pendaftaran</legend>
     <div class="mt-2 grid grid-cols-2 gap-2">
-      {% for j in f.jalur.iter() %}
+      {% for j in f.jalur %}
       <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 has-[:checked]:border-emerald-600 has-[:checked]:bg-emerald-50">
-        <input type="radio" name="jalur" value="{{ j.kode() }}" {% if j.kode() == f.jalur_dipilih.as_str() %}checked{% endif %} class="accent-emerald-700">
-        <span>{{ j.label() }}</span>
+        <input type="radio" name="jalur" value="{{ j.kode }}" {% if j.kode == f.jalur_dipilih %}checked{% endif %} class="accent-emerald-700">
+        <span>{{ j.label }}</span>
       </label>
       {% endfor %}
     </div>
-    {% if let Some(e) = f.err.jalur %}<p class="mt-1 text-sm text-red-600">{{ e }}</p>{% endif %}
+    {% if let Some(e) = f.err.get("jalur") %}<p class="mt-1 text-sm text-red-600">{{ e }}</p>{% endif %}
   </fieldset>
   <button class="w-full rounded-xl bg-emerald-700 px-6 py-3 font-semibold text-white hover:bg-emerald-800 disabled:opacity-60">
     Kirim pendaftaran

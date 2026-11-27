@@ -1,65 +1,56 @@
 # Portal PPDB Online (sampel)
 
-Aplikasi sampel **Penerimaan Peserta Didik Baru** untuk demo *Scaling Managed Kubernetes Across Government Sector* (webinar Btech x Civo). Rust full-stack dengan pola **MVC**: Axum + Askama + HTMX + Tailwind. Instansi, sekolah, dan data pendaftar semuanya **fiktif**.
-
-## Struktur MVC
+Aplikasi sampel **Penerimaan Peserta Didik Baru** untuk demo *Scaling Managed Kubernetes Across Government Sector* (webinar Btech x Civo). Terdiri dari **2 microservice Rust**, masing-masing berpola **MVC**. Instansi, sekolah, dan data pendaftar semuanya **fiktif**.
 
 ```
-src/
-├── main.rs                 # router, state, graceful shutdown
-├── config.rs               # konfigurasi dari environment variable
-├── models/                 # MODEL: data dan aturan bisnis, tanpa HTTP/HTML
-│   ├── pendaftar.rs        #   formulir, validasi NISN, verifikasi (beban CPU), penyimpanan
-│   └── sekolah.rs          #   sekolah tujuan, kuota, jalur pendaftaran
-├── views/mod.rs            # VIEW: struct template Askama
-└── controllers/            # CONTROLLER: handler HTTP
-    ├── home.rs             #   GET  /
-    ├── pendaftaran.rs      #   GET  /daftar, POST /daftar (HTMX: balas potongan HTML)
-    └── health.rs           #   GET  /healthz, /readyz, /info
-templates/                  # VIEW: HTML (Tailwind + HTMX)
-├── base.html  home.html  daftar.html
-└── partials/form.html  partials/hasil.html
-static/htmx.min.js          # HTMX 2.0.4 (vendored); app.css dibuat Tailwind saat build
+Pengguna -> Traefik (ingress) -> ppdb-web :8080 -> ppdb-api :8081
+                                  halaman HTML       REST JSON: validasi, verifikasi, nomor
+                                  2 replika          HPA 2-12 (beban CPU di sini)
+```
+
+## Struktur MVC per service
+
+```
+api/  ppdb-api   (Axum, JSON)
+  src/models/       MODEL       pendaftar.rs (validasi NISN, verifikasi, penyimpanan), sekolah.rs (kuota, jalur)
+  src/views/        VIEW        bentuk respons JSON (NISN asli tidak pernah keluar)
+  src/controllers/  CONTROLLER  /api/referensi, /api/pendaftaran, /api/statistik, /healthz, /readyz, /info
+
+web/  ppdb-web   (Axum + Askama + HTMX + Tailwind)
+  src/models/api.rs MODEL       klien ppdb-api (sumber data)
+  src/views/ + templates/  VIEW halaman dan potongan HTMX
+  src/controllers/  CONTROLLER  /, /daftar (GET/POST), /healthz, /readyz, /info
 ```
 
 ## Jalankan lokal
 
 ```bash
-./bin/tailwindcss -i styles/app.css -o static/app.css --minify   # unduh: tailwindcss-linux-x64 v3.4.17
-cargo run
-# http://localhost:8080
+cargo run -p ppdb-api                                   # :8081
+(cd web && ../bin/tailwindcss -i styles/app.css -o static/app.css --minify && cargo run -p ppdb-web)   # :8080
+# http://localhost:8080   (tailwindcss standalone v3.4.17 di bin/)
 ```
 
 ## Konfigurasi
 
-| Variabel | Default | Di Kubernetes datang dari |
-|---|---|---|
-| `APP_VERSION` | `v1` | ConfigMap `ppdb-config` per environment (diubah lewat GitOps = rilis baru) |
-| `APP_ENV` | `lokal` | ConfigMap `ppdb-config` |
-| `PENGUMUMAN` | kosong | ConfigMap `ppdb-config` |
-| `INSTANSI`, `TAHUN_AJARAN` | Dinas Pendidikan Kota Nusantara, 2027/2028 | ConfigMap |
-| `POD_NAME` | `lokal` | Downward API (`metadata.name`) |
-| `DB_USER` | kosong | Secret `db-credentials` dari Vault (Vault Secrets Operator); password tidak pernah ditampilkan |
-| `VERIFIKASI_ITERASI` | `20000` | Beban CPU per pendaftaran (hash berulang) |
-| `PORT` | `8080` | |
+| Variabel | Service | Default | Di Kubernetes |
+|---|---|---|---|
+| `APP_VERSION`, `APP_ENV` | web, api | `v1`, `lokal` | ConfigMap `ppdb-config` per environment (ubah `APP_VERSION` = rilis baru) |
+| `INSTANSI`, `TAHUN_AJARAN`, `PENGUMUMAN` | web (api: tahun) | Dinas Pendidikan Kota Nusantara, 2027/2028 | ConfigMap |
+| `POD_NAME` | web, api | `web-lokal`, `api-lokal` | Downward API; tampil di footer (pod web dan pod API) |
+| `API_URL` | web | `http://localhost:8081` | `http://ppdb-api:8081` |
+| `DB_USER` | api | kosong | Secret `db-credentials` dari Vault (VSO); password tidak pernah ditampilkan |
+| `VERIFIKASI_ITERASI` | api | `20000` | Beban CPU per pendaftaran |
 
-## Endpoint
-
-| Path | Fungsi |
-|---|---|
-| `/` | Beranda: info PPDB, kuota sekolah, pendaftar terakhir di pod ini |
-| `/daftar` | Formulir; `POST` memvalidasi, memverifikasi, dan menerbitkan nomor pendaftaran |
-| `/healthz` | Liveness |
-| `/readyz` | Readiness; 503 saat pod berhenti (SIGTERM) supaya rilis tanpa 502 |
-| `/info` | JSON versi, environment, pod, database |
-
-Uji beban (yang dipakai demo): `hey -z 240s -c 150 -m POST -T application/x-www-form-urlencoded -d "nama=Siti Aminah&nisn=0123456789&sekolah=SMPN1&jalur=domisili" http://<host>/daftar`
+Uji beban: `hey -z 240s -c 150 -m POST -T application/x-www-form-urlencoded -d "nama=Siti+Aminah&nisn=0123456789&sekolah=SMPN1&jalur=domisili" http://<host>/daftar`
 
 ## Image
 
-GitHub Actions (`.github/workflows/image.yml`) menjalankan `cargo test`, lalu build dan push `ghcr.io/dev-cer/sample-pendaftaran:<short-sha>` dan `:latest`. Setelah run pertama, ubah visibility package jadi **Public** supaya cluster bisa pull tanpa kredensial.
+GitHub Actions (`.github/workflows/image.yml`): `cargo test`, lalu build dan push ke satu package GHCR:
 
-Manifest Kubernetes dan GitOps-nya ada di repo [dev-cer/govtech](https://github.com/dev-cer/govtech).
+- `ghcr.io/dev-cer/sample-pendaftaran:web-<short-sha>` dan `:web-latest`
+- `ghcr.io/dev-cer/sample-pendaftaran:api-<short-sha>` dan `:api-latest`
+
+Package harus **Public** supaya cluster bisa pull tanpa kredensial. Manifest Kubernetes dan GitOps ada di [dev-cer/govtech](https://github.com/dev-cer/govtech).
 
 ## Lisensi
 

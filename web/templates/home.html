@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
+{% if let Some(g) = gangguan %}
+<div class="mb-6 rounded-xl bg-red-50 p-4 text-sm text-red-800 ring-1 ring-red-200"><b>Layanan pendaftaran sedang sibuk.</b> Silakan coba beberapa saat lagi. <span class="text-red-600">({{ g }})</span></div>
+{% endif %}
 <section class="grid gap-8 md:grid-cols-[1.4fr_1fr] md:items-center">
   <div>
     <p class="text-sm font-bold uppercase tracking-widest text-emerald-700">Penerimaan Peserta Didik Baru</p>
@@ -11,14 +14,14 @@
     </div>
   </div>
   <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-    <p class="text-sm font-semibold text-slate-500">Dilayani pod ini sejak berjalan</p>
+    <p class="text-sm font-semibold text-slate-500">Diproses pod API ini sejak berjalan</p>
     <p class="mt-1 text-5xl font-extrabold text-emerald-700">{{ total }}</p>
     <p class="text-sm text-slate-500">pendaftar</p>
     {% if !terakhir.is_empty() %}
     <ul class="mt-4 space-y-2 text-sm">
       {% for p in terakhir %}
       <li class="flex justify-between gap-2 border-t border-slate-100 pt-2">
-        <span class="font-mono">{{ p.nomor }}</span><span class="text-slate-500">{{ p.sekolah.kode }} · {{ p.jalur.label() }}</span>
+        <span class="font-mono">{{ p.nomor }}</span><span class="text-slate-500">{{ p.sekolah_kode }} · {{ p.jalur }}</span>
       </li>
       {% endfor %}
     </ul>

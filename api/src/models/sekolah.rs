@@ -1,8 +1,6 @@
-//! Model Sekolah: daftar sekolah tujuan (fiktif) dan kuota per jalur.
+//! Model Sekolah: sekolah tujuan (fiktif), kuota, dan jalur pendaftaran.
 
-use serde::Serialize;
-
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct Sekolah {
     pub kode: &'static str,
     pub nama: &'static str,
@@ -21,8 +19,7 @@ pub fn cari(kode: &str) -> Option<&'static Sekolah> {
     DAFTAR_SEKOLAH.iter().find(|s| s.kode == kode)
 }
 
-/// Jalur penerimaan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Jalur {
     Domisili,
     Afirmasi,

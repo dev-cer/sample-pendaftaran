@@ -35,8 +35,9 @@
     <div class="mx-auto max-w-5xl px-6 py-4 flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-500">
       <span class="rounded-full bg-emerald-100 px-3 py-0.5 font-semibold text-emerald-800">Versi: {{ app.version }}</span>
       <span>Environment: <b class="text-slate-700">{{ app.env }}</b></span>
-      <span>Dilayani pod: <b class="text-slate-700">{{ app.pod }}</b></span>
-      <span>Database: {% if app.db_user.is_empty() %}<b class="text-amber-700">belum terhubung</b>{% else %}<b class="text-slate-700">{{ app.db_user }}</b> (dari Vault){% endif %}</span>
+      <span>Pod web: <b class="text-slate-700">{{ app.pod }}</b></span>
+      {% if !app.api_pod.is_empty() %}<span>Pod API: <b class="text-slate-700">{{ app.api_pod }}</b></span>{% endif %}
+      {% if !app.db.is_empty() %}<span>Database: <b class="text-slate-700">{{ app.db }}</b> (dari Vault)</span>{% endif %}
       <span class="ml-auto">Aplikasi sampel · data fiktif</span>
     </div>
   </footer>
