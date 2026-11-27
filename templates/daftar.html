@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Formulir pendaftaran{% endblock %}
+{% block content %}
+<div class="mx-auto max-w-2xl">
+  <h1 class="text-3xl font-extrabold">Formulir pendaftaran</h1>
+  <p class="mt-2 text-slate-600">Isi data calon peserta didik sesuai dokumen. NISN ditampilkan tersamar di bukti pendaftaran.</p>
+  <div class="mt-6">
+    {% match hasil %}
+    {% when Some with (p) %}
+      {% include "partials/hasil.html" %}
+    {% when None %}
+      {% include "partials/form.html" %}
+    {% endmatch %}
+  </div>
+</div>
+{% endblock %}
