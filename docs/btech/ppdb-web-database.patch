@@ -1,0 +1,94 @@
+diff --git a/src/controllers/mod.rs b/src/controllers/mod.rs
+index 27417e4..6c85965 100644
+--- a/src/controllers/mod.rs
++++ b/src/controllers/mod.rs
+@@ -21,16 +21,17 @@ pub async fn home(State(st): State<Arc<AppState>>) -> Response {
+     let (refr, stat, dash) = tokio::join!(st.api.referensi(), st.api.statistik(), st.api.dashboard());
+     let r = RekapView::dari(&dash.unwrap_or_default());
+     let gangguan = refr.as_ref().err().or(stat.as_ref().err()).cloned();
+-    let (total, terakhir) = match &stat {
++    let (total, sumber, terakhir) = match &stat {
+         Ok(s) => {
+             app.api_pod = s.meta.pod.clone();
+             app.db = s.database.clone();
+-            (s.total_pod_ini, s.terakhir.clone())
++            app.store = s.store;
++            (s.total_pod_ini, s.sumber.clone(), s.terakhir.clone())
+         }
+-        Err(_) => (0, vec![]),
++        Err(_) => (0, String::new(), vec![]),
+     };
+     let _ = refr;
+-    render(HomeView { app, r, total, terakhir, gangguan })
++    render(HomeView { app, r, total, sumber, terakhir, gangguan })
+ }
+ 
+ /// GET /dashboard: rekap pendaftaran semua pod, diperbarui otomatis.
+diff --git a/src/models/api.rs b/src/models/api.rs
+index 37fe4e2..d8d50b9 100644
+--- a/src/models/api.rs
++++ b/src/models/api.rs
+@@ -47,6 +47,10 @@ pub struct Pendaftar {
+ #[derive(Clone, Debug, Deserialize)]
+ pub struct Statistik {
+     pub total_pod_ini: u64,
++    #[serde(default)]
++    pub sumber: String,
++    #[serde(default)]
++    pub store: bool,
+     pub terakhir: Vec<Pendaftar>,
+     pub database: String,
+     pub meta: Meta,
+diff --git a/src/views/mod.rs b/src/views/mod.rs
+index 778c684..e89bc9d 100644
+--- a/src/views/mod.rs
++++ b/src/views/mod.rs
+@@ -17,6 +17,7 @@ pub struct AppInfo {
+     pub pod: String,
+     pub api_pod: String,
+     pub db: String,
++    pub store: bool,
+ }
+ 
+ #[derive(Template)]
+@@ -25,6 +26,7 @@ pub struct HomeView {
+     pub app: AppInfo,
+     pub r: RekapView,
+     pub total: u64,
++    pub sumber: String,
+     pub terakhir: Vec<Pendaftar>,
+     pub gangguan: Option<String>,
+ }
+diff --git a/templates/base.html b/templates/base.html
+index 444c41b..44b2f0d 100644
+--- a/templates/base.html
++++ b/templates/base.html
+@@ -38,7 +38,8 @@
+       <span>Environment: <b class="text-slate-700">{{ app.env }}</b></span>
+       <span>Pod web: <b class="text-slate-700">{{ app.pod }}</b></span>
+       {% if !app.api_pod.is_empty() %}<span>Pod API: <b class="text-slate-700">{{ app.api_pod }}</b></span>{% endif %}
+-      {% if !app.db.is_empty() %}<span>Database: <b class="text-slate-700">{{ app.db }}</b> (dari Vault)</span>{% endif %}
++      {% if !app.db.is_empty() %}<span>Database: <b class="text-slate-700">{{ app.db }}</b> (kredensial dari Vault)</span>{% endif %}
++      {% if app.store %}<span>Rekap: <b class="text-slate-700">ppdb-store</b></span>{% endif %}
+       <span class="ml-auto">Aplikasi sampel · data fiktif</span>
+     </div>
+   </footer>
+diff --git a/templates/home.html b/templates/home.html
+index e7cd01b..6a5dcc7 100644
+--- a/templates/home.html
++++ b/templates/home.html
+@@ -14,9 +14,13 @@
+     </div>
+   </div>
+   <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
++    {% if sumber == "database" %}
++    <p class="text-sm font-semibold text-slate-500">Tersimpan di database</p>
++    {% else %}
+     <p class="text-sm font-semibold text-slate-500">Diproses pod API ini sejak berjalan</p>
++    {% endif %}
+     <p class="mt-1 text-5xl font-extrabold text-emerald-700">{{ total }}</p>
+-    <p class="text-sm text-slate-500">pendaftar</p>
++    <p class="text-sm text-slate-500">pendaftar{% if sumber == "database" %} · PostgreSQL di luar cluster{% endif %}</p>
+     {% if !terakhir.is_empty() %}
+     <ul class="mt-4 space-y-2 text-sm">
+       {% for p in terakhir %}

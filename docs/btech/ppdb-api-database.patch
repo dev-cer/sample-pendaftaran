@@ -1,0 +1,488 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 0385365..cf5ecf8 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -12,4 +12,6 @@ serde_json = { workspace = true }
+ sha2 = "0.10"
+ rand = "0.8"
+ chrono = { version = "0.4", default-features = false, features = ["clock"] }
++tokio-postgres = "0.7"
++deadpool-postgres = "0.14"
+ redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
+diff --git a/src/controllers/mod.rs b/src/controllers/mod.rs
+index 565dd5f..7971879 100644
+--- a/src/controllers/mod.rs
++++ b/src/controllers/mod.rs
+@@ -45,7 +45,7 @@ pub async fn daftar(State(st): State<Arc<AppState>>, Json(input): Json<InputPend
+     let kode = tokio::task::spawn_blocking(move || pendaftar::verifikasi(&nisn, &nama, iterasi))
+         .await
+         .unwrap_or_else(|_| "GAGAL".into());
+-    let p = Pendaftar {
++    let mut p = Pendaftar {
+         nomor: pendaftar::nomor_pendaftaran(&st.cfg.tahun_ajaran),
+         nama: input.nama.trim().to_string(),
+         nisn_tersamar: pendaftar::samarkan_nisn(input.nisn.trim()),
+@@ -54,21 +54,52 @@ pub async fn daftar(State(st): State<Arc<AppState>>, Json(input): Json<InputPend
+         waktu: chrono::Local::now().format("%d-%m-%Y %H:%M:%S").to_string(),
+         kode_verifikasi: kode,
+     };
+-    st.store.simpan(p.clone());
++    // Arsip: PostgreSQL di luar cluster bila tersambung (wajib berhasil), selain itu memori pod.
++    if st.db.aktif() {
++        if let Err(e) = st.db.simpan(&mut p, &st.cfg.tahun_ajaran, &st.cfg.pod).await {
++            eprintln!("basisdata: gagal menyimpan ({e})");
++            st.rekap.catat(p.sekolah.kode, false);
++            return (StatusCode::SERVICE_UNAVAILABLE, Json(Sibuk { pesan: "Data belum dapat disimpan, silakan coba lagi.", meta: meta(&st) })).into_response();
++        }
++    } else {
++        st.store.simpan(p.clone());
++    }
+     st.rekap.catat(p.sekolah.kode, true);
+     (StatusCode::CREATED, Json(Diterima { pendaftar: PendaftarJson::from(&p), meta: meta(&st) })).into_response()
+ }
+ 
+-/// GET /api/statistik: jumlah pendaftar yang diproses pod ini dan 5 terakhir.
++/// GET /api/statistik: total pendaftar tersimpan (database, atau memori pod ini) dan 5 terakhir.
+ pub async fn statistik(State(st): State<Arc<AppState>>) -> Json<Statistik> {
++    let (total, terakhir, sumber) = if st.db.aktif() {
++        let (t, l) = tokio::join!(st.db.total(), st.db.terakhir(5));
++        (t.unwrap_or(0), l, "database")
++    } else {
++        (st.store.total(), st.store.terakhir(5), "memori pod")
++    };
+     Json(Statistik {
+-        total_pod_ini: st.store.total(),
+-        terakhir: st.store.terakhir(5).iter().map(PendaftarJson::from).collect(),
+-        database: st.cfg.db_user.clone(),
++        total_pod_ini: total,
++        sumber,
++        terakhir: terakhir.iter().map(PendaftarJson::from).collect(),
++        database: if st.db.aktif() { format!("{}@{}", st.db.user, st.db.host) } else { String::new() },
++        store: st.rekap.aktif(),
+         meta: meta(&st),
+     })
+ }
+ 
++/// DELETE /api/rekap: kosongkan hitungan dashboard dan arsip pendaftar (demo; perlu IZINKAN_RESET=true).
++pub async fn reset(State(st): State<Arc<AppState>>) -> Response {
++    if !st.cfg.izinkan_reset {
++        return (StatusCode::FORBIDDEN, "reset tidak diizinkan").into_response();
++    }
++    let r = st.rekap.kosongkan().await;
++    let d = if st.db.aktif() { st.db.kosongkan().await } else { Ok(()) };
++    st.store.kosongkan();
++    match (r, d) {
++        (Ok(()), Ok(())) => (StatusCode::OK, "rekap dan arsip dikosongkan").into_response(),
++        (r, d) => (StatusCode::BAD_GATEWAY, format!("rekap: {r:?}, arsip: {d:?}")).into_response(),
++    }
++}
++
+ /// GET /api/dashboard: rekap bersama semua pod (per sekolah, per menit, pod aktif).
+ pub async fn dashboard(State(st): State<Arc<AppState>>) -> Json<Dashboard> {
+     let r = st.rekap.ringkasan(10).await;
+diff --git a/src/main.rs b/src/main.rs
+index 11f3c09..75740f5 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -10,6 +10,7 @@ mod views;
+ 
+ use axum::routing::{get, post};
+ use axum::Router;
++use models::basisdata::{Basisdata, Koneksi};
+ use models::pendaftar::PendaftarStore;
+ use models::rekap::Rekap;
+ use std::env;
+@@ -28,6 +29,8 @@ pub struct Config {
+     pub max_antrean: usize,
+     /// Zona waktu tampilan dashboard (jam dari UTC), default WIB.
+     pub tz_jam: i32,
++    /// DELETE /api/rekap diizinkan (demo saja)
++    pub izinkan_reset: bool,
+     pub port: u16,
+ }
+ 
+@@ -46,6 +49,7 @@ impl Config {
+             iterasi: var("VERIFIKASI_ITERASI", "20000").parse().unwrap_or(20000),
+             max_antrean: var("MAX_ANTREAN", "32").parse().unwrap_or(32),
+             tz_jam: var("TZ_JAM", "7").parse().unwrap_or(7),
++            izinkan_reset: var("IZINKAN_RESET", "false") == "true",
+             port: var("PORT", "8081").parse().unwrap_or(8081),
+         }
+     }
+@@ -55,19 +59,36 @@ pub struct AppState {
+     pub cfg: Config,
+     pub store: PendaftarStore,
+     pub rekap: Arc<Rekap>,
++    pub db: Arc<Basisdata>,
+     pub antrean: AtomicUsize,
+     pub ready: AtomicBool,
+ }
+ 
+-/// URL Valkey dari VALKEY_HOST (+ VALKEY_PASSWORD dari Secret Vault). Kosong = rekap nonaktif.
++/// URL Valkey dari VALKEY_HOST + VALKEY_USER/VALKEY_PASSWORD (Secret Vault). Kosong = rekap nonaktif.
+ fn valkey_url() -> Option<String> {
+     let host = var("VALKEY_HOST", "");
+     if host.is_empty() {
+         return None;
+     }
+-    let pw = var("VALKEY_PASSWORD", "");
++    let (user, pw) = (var("VALKEY_USER", ""), var("VALKEY_PASSWORD", ""));
+     let port = var("VALKEY_PORT", "6379");
+-    Some(if pw.is_empty() { format!("redis://{host}:{port}/") } else { format!("redis://:{pw}@{host}:{port}/") })
++    Some(if pw.is_empty() { format!("redis://{host}:{port}/") } else { format!("redis://{user}:{pw}@{host}:{port}/") })
++}
++
++/// Koneksi PostgreSQL dari DB_HOST + DB_USER/DB_PASSWORD (Secret Vault). Kosong = simpan di memori pod.
++fn koneksi_db() -> Option<Koneksi> {
++    let (host, user) = (var("DB_HOST", ""), var("DB_USER", ""));
++    if host.is_empty() || user.is_empty() {
++        return None;
++    }
++    Some(Koneksi {
++        port: var("DB_PORT", "5432").parse().unwrap_or(5432),
++        password: var("DB_PASSWORD", ""),
++        dbname: var("DB_NAME", &user),
++        pool: var("DB_POOL", "6").parse().unwrap_or(6),
++        host,
++        user,
++    })
+ }
+ 
+ pub fn router(st: Arc<AppState>) -> Router {
+@@ -76,6 +97,7 @@ pub fn router(st: Arc<AppState>) -> Router {
+         .route("/api/pendaftaran", post(controllers::daftar))
+         .route("/api/statistik", get(controllers::statistik))
+         .route("/api/dashboard", get(controllers::dashboard))
++        .route("/api/rekap", axum::routing::delete(controllers::reset))
+         .route("/healthz", get(controllers::healthz))
+         .route("/readyz", get(controllers::readyz))
+         .route("/info", get(controllers::info))
+@@ -86,9 +108,11 @@ pub fn router(st: Arc<AppState>) -> Router {
+ async fn main() {
+     let cfg = Config::from_env();
+     let addr = format!("0.0.0.0:{}", cfg.port);
+-    let rekap = Arc::new(Rekap::new(cfg.pod.clone()));
++    let rekap = Arc::new(Rekap::new(cfg.pod.clone(), var("VALKEY_PREFIX", "ppdb"), var("CLUSTER", "lokal")));
+     rekap.mulai(valkey_url());
+-    let st = Arc::new(AppState { cfg, store: PendaftarStore::default(), rekap, antrean: AtomicUsize::new(0), ready: AtomicBool::new(true) });
++    let db = Arc::new(Basisdata::new(&var("DB_HOST", ""), &cfg.db_user));
++    db.mulai(koneksi_db());
++    let st = Arc::new(AppState { cfg, store: PendaftarStore::default(), rekap, db, antrean: AtomicUsize::new(0), ready: AtomicBool::new(true) });
+     let listener = tokio::net::TcpListener::bind(&addr).await.expect("gagal bind port");
+     println!("ppdb-api {} ({}) di {addr}, pod {}, antrean maks {}", st.cfg.versi, st.cfg.environment, st.cfg.pod, st.cfg.max_antrean);
+     let s2 = st.clone();
+diff --git a/src/models/basisdata.rs b/src/models/basisdata.rs
+new file mode 100644
+index 0000000..ad1cfd5
+--- /dev/null
++++ b/src/models/basisdata.rs
+@@ -0,0 +1,153 @@
++//! Model Basisdata: arsip pendaftar di PostgreSQL (ppdb-db, di LUAR cluster).
++//!
++//! Kredensial (DB_USER / DB_PASSWORD) dari Vault lewat Secret `db-credentials`.
++//! Tersambung di latar belakang; sebelum tersambung pendaftaran disimpan di memori pod (mode cadangan).
++//! Setelah tersambung, setiap pendaftaran WAJIB tersimpan: bila database gagal, pendaftar mendapat 503.
++
++use crate::models::pendaftar::Pendaftar;
++use crate::models::sekolah::{self, Jalur};
++use deadpool_postgres::{Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime, Timeouts};
++use std::time::Duration;
++use tokio::sync::OnceCell;
++use tokio_postgres::NoTls;
++
++pub struct Basisdata {
++    pool: OnceCell<Pool>,
++    pub user: String,
++    pub host: String,
++}
++
++pub struct Koneksi {
++    pub host: String,
++    pub port: u16,
++    pub user: String,
++    pub password: String,
++    pub dbname: String,
++    pub pool: usize,
++}
++
++const SKEMA: &str = "
++CREATE TABLE IF NOT EXISTS pendaftar (
++    id              bigserial PRIMARY KEY,
++    tahun           text        NOT NULL,
++    nama            text        NOT NULL,
++    nisn_tersamar   text        NOT NULL,
++    sekolah         text        NOT NULL,
++    jalur           text        NOT NULL,
++    kode_verifikasi text        NOT NULL,
++    pod             text        NOT NULL,
++    dibuat          timestamptz NOT NULL DEFAULT now()
++);
++CREATE INDEX IF NOT EXISTS pendaftar_dibuat ON pendaftar (dibuat DESC);";
++
++const WAKTU: &str = "to_char(dibuat AT TIME ZONE 'Asia/Jakarta', 'DD-MM-YYYY HH24:MI:SS')";
++
++/// Nomor pendaftaran berurutan dari id database: PPDB-2027-000123
++fn nomor(tahun: &str, id: i64) -> String {
++    format!("PPDB-{}-{id:06}", tahun.split('/').next().unwrap_or("2027"))
++}
++
++impl Basisdata {
++    pub fn new(host: &str, user: &str) -> Self {
++        Self { pool: OnceCell::new(), user: user.to_string(), host: host.to_string() }
++    }
++
++    pub fn aktif(&self) -> bool {
++        self.pool.initialized()
++    }
++
++    /// Sambung di latar belakang (coba ulang tiap 3 detik) lalu buat tabel bila belum ada.
++    pub fn mulai(self: &std::sync::Arc<Self>, k: Option<Koneksi>) {
++        let Some(k) = k else {
++            println!("basisdata: DB_HOST/DB_USER kosong, pendaftar hanya disimpan di memori pod");
++            return;
++        };
++        let me = self.clone();
++        tokio::spawn(async move {
++            let mut cfg = Config::new();
++            cfg.host = Some(k.host.clone());
++            cfg.port = Some(k.port);
++            cfg.user = Some(k.user.clone());
++            cfg.password = Some(k.password.clone());
++            cfg.dbname = Some(k.dbname.clone());
++            cfg.application_name = Some("ppdb-api".into());
++            cfg.connect_timeout = Some(Duration::from_secs(3));
++            cfg.manager = Some(ManagerConfig { recycling_method: RecyclingMethod::Fast });
++            let mut pc = PoolConfig::new(k.pool);
++            pc.timeouts = Timeouts { wait: Some(Duration::from_secs(3)), create: Some(Duration::from_secs(3)), recycle: Some(Duration::from_secs(3)) };
++            cfg.pool = Some(pc);
++            let pool = match cfg.create_pool(Some(Runtime::Tokio1), NoTls) {
++                Ok(p) => p,
++                Err(e) => return eprintln!("basisdata: konfigurasi tidak valid: {e}"),
++            };
++            loop {
++                match pool.get().await {
++                    Ok(c) => match c.batch_execute(SKEMA).await {
++                        Ok(()) => {
++                            drop(c);
++                            let _ = me.pool.set(pool);
++                            println!("basisdata: tersambung ke {}:{} sebagai {}", k.host, k.port, k.user);
++                            break;
++                        }
++                        Err(e) => eprintln!("basisdata: gagal membuat tabel ({e}), coba lagi 3 detik"),
++                    },
++                    Err(e) => eprintln!("basisdata: belum tersambung ({e}), coba lagi 3 detik"),
++                }
++                tokio::time::sleep(Duration::from_secs(3)).await;
++            }
++        });
++    }
++
++    /// Simpan pendaftar; database memberi id (nomor berurutan) dan waktu.
++    pub async fn simpan(&self, p: &mut Pendaftar, tahun: &str, pod: &str) -> Result<(), String> {
++        let pool = self.pool.get().ok_or("basisdata belum tersambung")?;
++        let c = pool.get().await.map_err(|e| e.to_string())?;
++        let sql = format!(
++            "INSERT INTO pendaftar (tahun, nama, nisn_tersamar, sekolah, jalur, kode_verifikasi, pod)
++             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, {WAKTU}"
++        );
++        let row = c
++            .query_one(&sql, &[&tahun, &p.nama, &p.nisn_tersamar, &p.sekolah.kode, &p.jalur.kode(), &p.kode_verifikasi, &pod])
++            .await
++            .map_err(|e| e.to_string())?;
++        p.nomor = nomor(tahun, row.get::<_, i64>(0));
++        p.waktu = row.get(1);
++        Ok(())
++    }
++
++    pub async fn total(&self) -> Option<u64> {
++        let c = self.pool.get()?.get().await.ok()?;
++        let r = c.query_one("SELECT count(*) FROM pendaftar", &[]).await.ok()?;
++        Some(r.get::<_, i64>(0) as u64)
++    }
++
++    pub async fn terakhir(&self, n: i64) -> Vec<Pendaftar> {
++        let Some(pool) = self.pool.get() else { return vec![] };
++        let Ok(c) = pool.get().await else { return vec![] };
++        let sql = format!(
++            "SELECT id, tahun, nama, nisn_tersamar, sekolah, jalur, kode_verifikasi, {WAKTU} FROM pendaftar ORDER BY id DESC LIMIT $1"
++        );
++        let Ok(rows) = c.query(&sql, &[&n]).await else { return vec![] };
++        rows.iter()
++            .filter_map(|r| {
++                let tahun: String = r.get(1);
++                Some(Pendaftar {
++                    nomor: nomor(&tahun, r.get(0)),
++                    nama: r.get(2),
++                    nisn_tersamar: r.get(3),
++                    sekolah: sekolah::cari(r.get::<_, &str>(4))?,
++                    jalur: Jalur::dari_kode(r.get::<_, &str>(5))?,
++                    kode_verifikasi: r.get(6),
++                    waktu: r.get(7),
++                })
++            })
++            .collect()
++    }
++
++    /// Kosongkan arsip (hanya untuk demo, dijaga IZINKAN_RESET).
++    pub async fn kosongkan(&self) -> Result<(), String> {
++        let pool = self.pool.get().ok_or("basisdata belum tersambung")?;
++        let c = pool.get().await.map_err(|e| e.to_string())?;
++        c.batch_execute("TRUNCATE pendaftar RESTART IDENTITY").await.map_err(|e| e.to_string())
++    }
++}
+diff --git a/src/models/mod.rs b/src/models/mod.rs
+index fb449bd..1a27313 100644
+--- a/src/models/mod.rs
++++ b/src/models/mod.rs
+@@ -1,3 +1,4 @@
++pub mod basisdata;
+ pub mod pendaftar;
+ pub mod rekap;
+ pub mod sekolah;
+diff --git a/src/models/pendaftar.rs b/src/models/pendaftar.rs
+index 6d97157..08036e7 100644
+--- a/src/models/pendaftar.rs
++++ b/src/models/pendaftar.rs
+@@ -120,6 +120,11 @@ impl PendaftarStore {
+         self.total.load(Ordering::Relaxed)
+     }
+ 
++    pub fn kosongkan(&self) {
++        self.data.write().unwrap().clear();
++        self.total.store(0, Ordering::Relaxed);
++    }
++
+     pub fn terakhir(&self, n: usize) -> Vec<Pendaftar> {
+         self.data.read().unwrap().iter().rev().take(n).cloned().collect()
+     }
+diff --git a/src/models/rekap.rs b/src/models/rekap.rs
+index 343587c..4a3f8b7 100644
+--- a/src/models/rekap.rs
++++ b/src/models/rekap.rs
+@@ -1,9 +1,10 @@
+ //! Model Rekap: penghitung bersama semua pod API di ppdb-store (Valkey).
+ //!
+-//! Kunci:
+-//!   ppdb:diterima / ppdb:gagal   HASH kode_sekolah -> jumlah
+-//!   ppdb:m:<menit>:diterima|gagal  jumlah per menit (kedaluwarsa 2 jam)
+-//!   ppdb:pods                    ZSET pod -> detik terakhir aktif (heartbeat)
++//! ppdb-store berjalan di LUAR cluster (VM data). Kunci diawali VALKEY_PREFIX (mis. ppdb:production),
++//! dan user ACL tiap environment hanya boleh menyentuh prefix-nya sendiri.
++//!   <prefix>:diterima / :gagal          HASH kode_sekolah -> jumlah (gabungan prod-dc dan prod-drc)
++//!   <prefix>:m:<menit>:diterima|gagal   jumlah per menit (kedaluwarsa 2 jam)
++//!   <prefix>:pods:<cluster>             ZSET pod -> detik terakhir aktif (heartbeat per cluster)
+ //! Bila ppdb-store tidak terjangkau, pendaftaran tetap jalan; rekap saja yang kosong.
+ 
+ use redis::aio::ConnectionManager;
+@@ -14,6 +15,8 @@ use tokio::sync::OnceCell;
+ pub struct Rekap {
+     conn: OnceCell<ConnectionManager>,
+     pod: String,
++    prefix: String,
++    cluster: String,
+ }
+ 
+ #[derive(Default)]
+@@ -31,8 +34,16 @@ fn menit_ini() -> i64 {
+ }
+ 
+ impl Rekap {
+-    pub fn new(pod: String) -> Self {
+-        Self { conn: OnceCell::new(), pod }
++    pub fn new(pod: String, prefix: String, cluster: String) -> Self {
++        Self { conn: OnceCell::new(), pod, prefix, cluster }
++    }
++
++    fn k(&self, s: &str) -> String {
++        format!("{}:{s}", self.prefix)
++    }
++
++    pub fn aktif(&self) -> bool {
++        self.conn.initialized()
+     }
+ 
+     /// Sambung ke Valkey di latar belakang (coba ulang sampai berhasil), lalu kirim heartbeat tiap 5 detik.
+@@ -63,9 +74,10 @@ impl Rekap {
+             loop {
+                 if let Some(mut c) = me.conn.get().cloned() {
+                     let now = chrono::Utc::now().timestamp();
++                    let kp = me.k(&format!("pods:{}", me.cluster));
+                     let _: Result<(), _> = redis::pipe()
+-                        .zadd("ppdb:pods", &me.pod, now).ignore()
+-                        .zrembyscore("ppdb:pods", 0, now - 60).ignore()
++                        .zadd(&kp, &me.pod, now).ignore()
++                        .zrembyscore(&kp, 0, now - 60).ignore()
+                         .query_async(&mut c).await;
+                 }
+                 tokio::time::sleep(Duration::from_secs(5)).await;
+@@ -77,10 +89,10 @@ impl Rekap {
+     pub fn catat(&self, kode_sekolah: &'static str, diterima: bool) {
+         let Some(mut c) = self.conn.get().cloned() else { return };
+         let jenis = if diterima { "diterima" } else { "gagal" };
++        let (km, kh) = (self.k(&format!("m:{}:{jenis}", menit_ini())), self.k(jenis));
+         tokio::spawn(async move {
+-            let km = format!("ppdb:m:{}:{jenis}", menit_ini());
+             let _: Result<(), _> = redis::pipe()
+-                .hincr(format!("ppdb:{jenis}"), kode_sekolah, 1).ignore()
++                .hincr(kh, kode_sekolah, 1).ignore()
+                 .incr(&km, 1).ignore()
+                 .expire(&km, 7200).ignore()
+                 .query_async(&mut c).await;
+@@ -93,15 +105,15 @@ impl Rekap {
+         let daftar: Vec<i64> = (akhir - menit + 1..=akhir).collect();
+         let mut kunci = Vec::new();
+         for m in &daftar {
+-            kunci.push(format!("ppdb:m:{m}:diterima"));
+-            kunci.push(format!("ppdb:m:{m}:gagal"));
++            kunci.push(self.k(&format!("m:{m}:diterima")));
++            kunci.push(self.k(&format!("m:{m}:gagal")));
+         }
+         let now = chrono::Utc::now().timestamp();
+         let hasil: Result<(HashMap<String, u64>, HashMap<String, u64>, Vec<Option<u64>>, u64), _> = redis::pipe()
+-            .hgetall("ppdb:diterima")
+-            .hgetall("ppdb:gagal")
++            .hgetall(self.k("diterima"))
++            .hgetall(self.k("gagal"))
+             .mget(&kunci)
+-            .zcount("ppdb:pods", now - 15, "+inf")
++            .zcount(self.k(&format!("pods:{}", self.cluster)), now - 15, "+inf")
+             .query_async(&mut c)
+             .await;
+         match hasil {
+@@ -122,4 +134,16 @@ impl Rekap {
+             }
+         }
+     }
++
++    /// Kosongkan hitungan (hanya untuk demo): total per sekolah dan per menit 3 jam terakhir.
++    pub async fn kosongkan(&self) -> Result<(), String> {
++        let mut c = self.conn.get().cloned().ok_or("ppdb-store belum tersambung")?;
++        let akhir = menit_ini();
++        let mut kunci = vec![self.k("diterima"), self.k("gagal")];
++        for m in akhir - 180..=akhir {
++            kunci.push(self.k(&format!("m:{m}:diterima")));
++            kunci.push(self.k(&format!("m:{m}:gagal")));
++        }
++        redis::cmd("DEL").arg(&kunci).query_async::<()>(&mut c).await.map_err(|e| e.to_string())
++    }
+ }
+diff --git a/src/views/mod.rs b/src/views/mod.rs
+index 78c0352..7ce653f 100644
+--- a/src/views/mod.rs
++++ b/src/views/mod.rs
+@@ -88,9 +88,14 @@ pub struct Ditolak {
+ 
+ #[derive(Serialize)]
+ pub struct Statistik {
++    /// total tersimpan: dari database bila tersambung, selain itu hitungan pod ini
+     pub total_pod_ini: u64,
++    /// "database" atau "memori pod"
++    pub sumber: &'static str,
++    /// ppdb-store (Valkey) tersambung
++    pub store: bool,
+     pub terakhir: Vec<PendaftarJson>,
+-    /// Username database dari Vault (tanpa password); kosong = belum terhubung.
++    /// user@host database (kredensial dari Vault, tanpa password); kosong = belum tersambung.
+     pub database: String,
+     pub meta: Meta,
+ }
