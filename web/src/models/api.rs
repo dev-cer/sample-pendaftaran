@@ -47,6 +47,10 @@ pub struct Pendaftar {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Statistik {
     pub total_pod_ini: u64,
+    #[serde(default)]
+    pub sumber: String,
+    #[serde(default)]
+    pub store: bool,
     pub terakhir: Vec<Pendaftar>,
     pub database: String,
     pub meta: Meta,

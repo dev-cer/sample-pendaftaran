@@ -3,10 +3,11 @@
 Aplikasi sampel **Penerimaan Peserta Didik Baru** untuk demo *Scaling Managed Kubernetes Across Government Sector* (webinar Btech x Civo). Terdiri dari **2 microservice Rust**, masing-masing berpola **MVC**. Instansi, sekolah, dan data pendaftar semuanya **fiktif**.
 
 ```
-Pengguna -> Traefik (ingress) -> ppdb-web :8080 -> ppdb-api :8081 -> ppdb-store (Valkey) :6379
-                                  halaman HTML       REST JSON          penghitung bersama semua pod
-                                  /dashboard rekap   antrean maks/pod   (password dari Vault)
-                                                     HPA 2-12
+            ┌──────────────── cluster Kubernetes (Civo) ────────────────┐      ┌──── di LUAR cluster (VM data) ────┐
+Pengguna -> Traefik -> ppdb-web :8080 -> ppdb-api :8081 ──────────────────────> PostgreSQL 16  (ppdb-db)   arsip pendaftar
+                       halaman HTML     REST JSON, antrean maks/pod ─────────> Valkey 8      (ppdb-store) rekap dashboard
+                       /dashboard       HPA 2-12                              user per environment, password dari Vault
+            └────────────────────────────────────────────────────────────┘      └────────────────────────────────────┘
 ```
 
 Saat satu pod API sedang memproses lebih dari `MAX_ANTREAN` pendaftaran, pendaftar berikutnya dijawab **503 "server sibuk"** dan dicatat sebagai **gagal**. Dengan 2 pod tetap, banyak yang gagal; setelah HPA menambah pod, angka gagal turun. Semuanya terlihat di `/dashboard` (per sekolah, per menit, jumlah pod API aktif).
@@ -44,7 +45,10 @@ VALKEY_HOST=127.0.0.1 cargo run -p ppdb-api              # :8081 (redis-server/v
 | `DB_USER` | api | kosong | Secret `db-credentials` dari Vault (VSO); password tidak pernah ditampilkan |
 | `VERIFIKASI_ITERASI` | api | `20000` | Beban CPU per pendaftaran |
 | `MAX_ANTREAN` | api | `32` | Pendaftaran bersamaan per pod; lebih = 503 dan dicatat gagal |
-| `VALKEY_HOST`, `VALKEY_PASSWORD` | api | kosong (rekap nonaktif) | `ppdb-store`; password dari Secret `db-credentials` (Vault) |
+| `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_POOL` | api | kosong (simpan di memori pod) | `ppdb-db` (Service ke VM data); user/password dari Secret `db-credentials` (Vault). Tabel `pendaftar` dibuat otomatis; nomor pendaftaran = id berurutan |
+| `VALKEY_HOST`, `VALKEY_USER`, `VALKEY_PASSWORD`, `VALKEY_PREFIX` | api | kosong (rekap nonaktif) | `ppdb-store`; user ACL per environment hanya boleh kunci `<prefix>:*` |
+| `CLUSTER` | api | `lokal` | Nama cluster (hitungan pod aktif per cluster) |
+| `IZINKAN_RESET` | api | `false` | `true` = `DELETE /api/rekap` mengosongkan rekap dan arsip (demo saja) |
 
 Uji beban: `hey -z 240s -c 150 -m POST -T application/x-www-form-urlencoded -d "nama=Siti+Aminah&nisn=0123456789&sekolah=SMPN1&jalur=domisili" http://<host>/daftar`
 

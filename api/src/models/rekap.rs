@@ -1,9 +1,10 @@
 //! Model Rekap: penghitung bersama semua pod API di ppdb-store (Valkey).
 //!
-//! Kunci:
-//!   ppdb:diterima / ppdb:gagal   HASH kode_sekolah -> jumlah
-//!   ppdb:m:<menit>:diterima|gagal  jumlah per menit (kedaluwarsa 2 jam)
-//!   ppdb:pods                    ZSET pod -> detik terakhir aktif (heartbeat)
+//! ppdb-store berjalan di LUAR cluster (VM data). Kunci diawali VALKEY_PREFIX (mis. ppdb:production),
+//! dan user ACL tiap environment hanya boleh menyentuh prefix-nya sendiri.
+//!   <prefix>:diterima / :gagal          HASH kode_sekolah -> jumlah (gabungan prod-dc dan prod-drc)
+//!   <prefix>:m:<menit>:diterima|gagal   jumlah per menit (kedaluwarsa 2 jam)
+//!   <prefix>:pods:<cluster>             ZSET pod -> detik terakhir aktif (heartbeat per cluster)
 //! Bila ppdb-store tidak terjangkau, pendaftaran tetap jalan; rekap saja yang kosong.
 
 use redis::aio::ConnectionManager;
@@ -14,6 +15,8 @@ use tokio::sync::OnceCell;
 pub struct Rekap {
     conn: OnceCell<ConnectionManager>,
     pod: String,
+    prefix: String,
+    cluster: String,
 }
 
 #[derive(Default)]
@@ -31,8 +34,16 @@ fn menit_ini() -> i64 {
 }
 
 impl Rekap {
-    pub fn new(pod: String) -> Self {
-        Self { conn: OnceCell::new(), pod }
+    pub fn new(pod: String, prefix: String, cluster: String) -> Self {
+        Self { conn: OnceCell::new(), pod, prefix, cluster }
+    }
+
+    fn k(&self, s: &str) -> String {
+        format!("{}:{s}", self.prefix)
+    }
+
+    pub fn aktif(&self) -> bool {
+        self.conn.initialized()
     }
 
     /// Sambung ke Valkey di latar belakang (coba ulang sampai berhasil), lalu kirim heartbeat tiap 5 detik.
@@ -63,9 +74,10 @@ impl Rekap {
             loop {
                 if let Some(mut c) = me.conn.get().cloned() {
                     let now = chrono::Utc::now().timestamp();
+                    let kp = me.k(&format!("pods:{}", me.cluster));
                     let _: Result<(), _> = redis::pipe()
-                        .zadd("ppdb:pods", &me.pod, now).ignore()
-                        .zrembyscore("ppdb:pods", 0, now - 60).ignore()
+                        .zadd(&kp, &me.pod, now).ignore()
+                        .zrembyscore(&kp, 0, now - 60).ignore()
                         .query_async(&mut c).await;
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -77,10 +89,10 @@ impl Rekap {
     pub fn catat(&self, kode_sekolah: &'static str, diterima: bool) {
         let Some(mut c) = self.conn.get().cloned() else { return };
         let jenis = if diterima { "diterima" } else { "gagal" };
+        let (km, kh) = (self.k(&format!("m:{}:{jenis}", menit_ini())), self.k(jenis));
         tokio::spawn(async move {
-            let km = format!("ppdb:m:{}:{jenis}", menit_ini());
             let _: Result<(), _> = redis::pipe()
-                .hincr(format!("ppdb:{jenis}"), kode_sekolah, 1).ignore()
+                .hincr(kh, kode_sekolah, 1).ignore()
                 .incr(&km, 1).ignore()
                 .expire(&km, 7200).ignore()
                 .query_async(&mut c).await;
@@ -93,15 +105,15 @@ impl Rekap {
         let daftar: Vec<i64> = (akhir - menit + 1..=akhir).collect();
         let mut kunci = Vec::new();
         for m in &daftar {
-            kunci.push(format!("ppdb:m:{m}:diterima"));
-            kunci.push(format!("ppdb:m:{m}:gagal"));
+            kunci.push(self.k(&format!("m:{m}:diterima")));
+            kunci.push(self.k(&format!("m:{m}:gagal")));
         }
         let now = chrono::Utc::now().timestamp();
         let hasil: Result<(HashMap<String, u64>, HashMap<String, u64>, Vec<Option<u64>>, u64), _> = redis::pipe()
-            .hgetall("ppdb:diterima")
-            .hgetall("ppdb:gagal")
+            .hgetall(self.k("diterima"))
+            .hgetall(self.k("gagal"))
             .mget(&kunci)
-            .zcount("ppdb:pods", now - 15, "+inf")
+            .zcount(self.k(&format!("pods:{}", self.cluster)), now - 15, "+inf")
             .query_async(&mut c)
             .await;
         match hasil {
@@ -121,5 +133,17 @@ impl Rekap {
                 Ringkasan::default()
             }
         }
+    }
+
+    /// Kosongkan hitungan (hanya untuk demo): total per sekolah dan per menit 3 jam terakhir.
+    pub async fn kosongkan(&self) -> Result<(), String> {
+        let mut c = self.conn.get().cloned().ok_or("ppdb-store belum tersambung")?;
+        let akhir = menit_ini();
+        let mut kunci = vec![self.k("diterima"), self.k("gagal")];
+        for m in akhir - 180..=akhir {
+            kunci.push(self.k(&format!("m:{m}:diterima")));
+            kunci.push(self.k(&format!("m:{m}:gagal")));
+        }
+        redis::cmd("DEL").arg(&kunci).query_async::<()>(&mut c).await.map_err(|e| e.to_string())
     }
 }

@@ -38,7 +38,8 @@
       <span>Environment: <b class="text-slate-700">{{ app.env }}</b></span>
       <span>Pod web: <b class="text-slate-700">{{ app.pod }}</b></span>
       {% if !app.api_pod.is_empty() %}<span>Pod API: <b class="text-slate-700">{{ app.api_pod }}</b></span>{% endif %}
-      {% if !app.db.is_empty() %}<span>Database: <b class="text-slate-700">{{ app.db }}</b> (dari Vault)</span>{% endif %}
+      {% if !app.db.is_empty() %}<span>Database: <b class="text-slate-700">{{ app.db }}</b> (kredensial dari Vault)</span>{% endif %}
+      {% if app.store %}<span>Rekap: <b class="text-slate-700">ppdb-store</b></span>{% endif %}
       <span class="ml-auto">Aplikasi sampel · data fiktif</span>
     </div>
   </footer>

@@ -14,9 +14,13 @@
     </div>
   </div>
   <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+    {% if sumber == "database" %}
+    <p class="text-sm font-semibold text-slate-500">Tersimpan di database</p>
+    {% else %}
     <p class="text-sm font-semibold text-slate-500">Diproses pod API ini sejak berjalan</p>
+    {% endif %}
     <p class="mt-1 text-5xl font-extrabold text-emerald-700">{{ total }}</p>
-    <p class="text-sm text-slate-500">pendaftar</p>
+    <p class="text-sm text-slate-500">pendaftar{% if sumber == "database" %} · PostgreSQL di luar cluster{% endif %}</p>
     {% if !terakhir.is_empty() %}
     <ul class="mt-4 space-y-2 text-sm">
       {% for p in terakhir %}

@@ -88,9 +88,14 @@ pub struct Ditolak {
 
 #[derive(Serialize)]
 pub struct Statistik {
+    /// total tersimpan: dari database bila tersambung, selain itu hitungan pod ini
     pub total_pod_ini: u64,
+    /// "database" atau "memori pod"
+    pub sumber: &'static str,
+    /// ppdb-store (Valkey) tersambung
+    pub store: bool,
     pub terakhir: Vec<PendaftarJson>,
-    /// Username database dari Vault (tanpa password); kosong = belum terhubung.
+    /// user@host database (kredensial dari Vault, tanpa password); kosong = belum tersambung.
     pub database: String,
     pub meta: Meta,
 }

@@ -21,16 +21,17 @@ pub async fn home(State(st): State<Arc<AppState>>) -> Response {
     let (refr, stat, dash) = tokio::join!(st.api.referensi(), st.api.statistik(), st.api.dashboard());
     let r = RekapView::dari(&dash.unwrap_or_default());
     let gangguan = refr.as_ref().err().or(stat.as_ref().err()).cloned();
-    let (total, terakhir) = match &stat {
+    let (total, sumber, terakhir) = match &stat {
         Ok(s) => {
             app.api_pod = s.meta.pod.clone();
             app.db = s.database.clone();
-            (s.total_pod_ini, s.terakhir.clone())
+            app.store = s.store;
+            (s.total_pod_ini, s.sumber.clone(), s.terakhir.clone())
         }
-        Err(_) => (0, vec![]),
+        Err(_) => (0, String::new(), vec![]),
     };
     let _ = refr;
-    render(HomeView { app, r, total, terakhir, gangguan })
+    render(HomeView { app, r, total, sumber, terakhir, gangguan })
 }
 
 /// GET /dashboard: rekap pendaftaran semua pod, diperbarui otomatis.

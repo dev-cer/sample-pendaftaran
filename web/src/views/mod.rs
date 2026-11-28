@@ -17,6 +17,7 @@ pub struct AppInfo {
     pub pod: String,
     pub api_pod: String,
     pub db: String,
+    pub store: bool,
 }
 
 #[derive(Template)]
@@ -25,6 +26,7 @@ pub struct HomeView {
     pub app: AppInfo,
     pub r: RekapView,
     pub total: u64,
+    pub sumber: String,
     pub terakhir: Vec<Pendaftar>,
     pub gangguan: Option<String>,
 }

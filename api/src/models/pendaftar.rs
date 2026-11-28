@@ -120,6 +120,11 @@ impl PendaftarStore {
         self.total.load(Ordering::Relaxed)
     }
 
+    pub fn kosongkan(&self) {
+        self.data.write().unwrap().clear();
+        self.total.store(0, Ordering::Relaxed);
+    }
+
     pub fn terakhir(&self, n: usize) -> Vec<Pendaftar> {
         self.data.read().unwrap().iter().rev().take(n).cloned().collect()
     }
